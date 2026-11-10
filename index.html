@@ -1,0 +1,1246 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>별빛 수비대</title>
+<style>
+  /* 게임 화면 크기: 실제 값은 아래 스크립트의 resize()가 창에 맞춰 정해요 */
+  :root { --w: min(100vw, 133.33vh); --h: calc(var(--w) * 0.75); }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    display: grid;
+    place-items: center;
+    overflow: hidden;
+    background: #02010a;
+    color: #fff;
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
+  }
+
+  #stage { position: relative; width: var(--w); height: var(--h); }
+  canvas { display: block; width: 100%; height: 100%; }
+
+  /* 시작 화면, 게임 오버 화면, 클리어 화면 */
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: calc(var(--w) * 0.025);
+    padding: 0 16px;
+    background: rgba(2, 1, 14, 0.68);
+    text-align: center;
+  }
+  #overlay[hidden] { display: none; }
+
+  #headline {
+    font-size: calc(var(--w) * 0.12);
+    font-weight: 800;
+    line-height: 1.1;
+    color: #00e5ff;
+    text-shadow:
+      0 0 calc(var(--w) * 0.008) currentColor,
+      0 0 calc(var(--w) * 0.03) currentColor,
+      0 0 calc(var(--w) * 0.07) currentColor;
+  }
+  #headline.over { color: #ff2a6d; }
+  #headline.clear { color: #fff200; }
+
+  #message {
+    font-size: max(15px, calc(var(--w) * 0.024));
+    line-height: 1.6;
+    white-space: pre-line;
+    color: #c9f7ff;
+  }
+
+  #startBtn {
+    padding: calc(var(--w) * 0.016) calc(var(--w) * 0.05);
+    border: 2px solid #ff2fd0;
+    border-radius: 999px;
+    background: rgba(255, 47, 208, 0.12);
+    color: #ffd6f6;
+    font: inherit;
+    font-size: max(20px, calc(var(--w) * 0.032));
+    font-weight: 800;
+    cursor: pointer;
+    box-shadow: 0 0 calc(var(--w) * 0.025) #ff2fd0, inset 0 0 calc(var(--w) * 0.012) #ff2fd0;
+  }
+  #startBtn:hover { background: #ff2fd0; color: #14021a; }
+
+  /* 소리 켜기/끄기 버튼 */
+  #soundBtn {
+    position: absolute;
+    top: max(6px, calc(var(--w) * 0.012));
+    right: max(6px, calc(var(--w) * 0.012));
+    width: max(40px, calc(var(--w) * 0.05));
+    height: max(40px, calc(var(--w) * 0.05));
+    padding: max(7px, calc(var(--w) * 0.008));
+    border: 2px solid currentColor;
+    border-radius: 50%;
+    background: rgba(2, 1, 14, 0.6);
+    color: #00e5ff;
+    cursor: pointer;
+    box-shadow: 0 0 calc(var(--w) * 0.012) currentColor;
+  }
+  #soundBtn svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  #soundBtn .cross { display: none; }
+  #soundBtn.off { color: #ff2a6d; }
+  #soundBtn.off .wave { display: none; }
+  #soundBtn.off .cross { display: inline; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+  <div id="overlay">
+    <h1 id="headline">별빛 수비대</h1>
+    <p id="message"></p>
+    <button id="startBtn" type="button">게임 시작</button>
+  </div>
+  <button id="soundBtn" type="button" aria-label="소리 끄기" title="소리 끄기">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 9.5v5h4l5 4v-13l-5 4z"/>
+      <path class="wave" d="M15.5 9a4.5 4.5 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11"/>
+      <path class="cross" d="M16 9.5l5 5m0-5l-5 5"/>
+    </svg>
+  </button>
+</div>
+
+<script>
+// ===== 기본 준비 =====
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+const headline = document.getElementById('headline');
+const message = document.getElementById('message');
+const startBtn = document.getElementById('startBtn');
+const soundBtn = document.getElementById('soundBtn');
+
+// 게임 속 화면 크기 (가로는 항상 800, 세로는 창 모양에 맞춰 600~1400)
+const W = 800;
+const BASE_H = 600;
+const MAX_H = 1400;
+let H = BASE_H;
+let speedRatio = 1;   // 세로로 길어진 만큼 위아래 움직임도 빠르게
+let uiScale = 1;      // 작은 화면에서 글자를 키우는 배율
+let isNarrow = false; // 폭이 좁은 화면이면 점수판을 여러 줄로
+let formationTop = 88;// 외계인 대열의 맨 윗줄 높이
+let hudRight = W;     // 점수판을 그릴 수 있는 오른쪽 끝
+
+// 숫자를 바꾸면 게임 난이도가 달라져요
+const ROWS = 4;              // 외계인 줄 수
+const COLS = 8;              // 외계인 칸 수
+const SHIP_SPEED = 430;      // 우주선 속도
+const SHOT_SPEED = 640;      // 내 총알 속도
+const SHOT_DELAY = 0.28;     // 총알을 다시 쏠 수 있을 때까지 걸리는 시간(초)
+const ENEMY_SHOT_SPEED = 280;// 외계인 총알 속도
+const ALIEN_SPEED = 40;      // 외계인 처음 속도
+const ALIEN_DROP = 16;       // 벽에 닿았을 때 내려오는 거리
+const STAGE_SPEED_UP = 18;   // 스테이지가 오를 때마다 외계인이 빨라지는 정도
+const MAX_STAGE = 5;         // 마지막 스테이지
+const DIVE_START_STAGE = 2;  // 급강하가 시작되는 스테이지
+const RETURN_SPEED = 340;    // 외계인이 대열로 돌아가는 속도
+const START_LIVES = 3;       // 처음 목숨 수
+const SCORE_PER_ALIEN = 10;  // 외계인 한 마리 점수
+const ITEM_CHANCE = 0.1;     // 아이템이 떨어질 확률 (0.1은 10%)
+const ITEM_SPEED = 150;      // 아이템이 떨어지는 속도
+const DOUBLE_SHOT_TIME = 10; // 두 발 쏘기가 유지되는 시간(초)
+const BANNER_TIME = 1.6;     // "스테이지 N" 글자가 떠 있는 시간(초)
+
+// 줄마다 다른 색
+const ALIEN_COLORS = ['#ff2fd0', '#ff9a1f', '#00ffb3', '#a45cff'];
+const ITEM_COLORS = { double: '#39ff14', shield: '#fff200' };
+
+// 게임 상태: ready(시작 전), playing(게임 중), over(게임 오버), clear(클리어)
+let state = 'ready';
+let time = 0;
+let score = 0;
+let scale = 1;
+
+const player = { x: W / 2, y: H - 46, w: 40, h: 34 };
+let aliens = [];
+let alienDir = 1;      // 1이면 오른쪽, -1이면 왼쪽
+let shots = [];        // 내 총알
+let enemyShots = [];   // 외계인 총알
+let particles = [];    // 터질 때 나오는 조각
+let items = [];        // 떨어지는 아이템
+let shotCooldown = 0;
+let enemyShotTimer = 1;
+let diveTimer = 2;     // 다음 급강하까지 남은 시간
+
+let stage = 1;
+let lives = START_LIVES;
+let hasShield = false;
+let doubleTime = 0;    // 두 발 쏘기 남은 시간
+let invincible = 0;    // 맞은 직후 잠깐 안 맞는 시간
+let bannerTime = 0;    // "스테이지 N" 글자가 남아 있는 시간
+
+// 입력 상태
+const keys = {};
+let mouseX = null;     // 마우스 위치 (키보드를 쓰면 null)
+let mouseDown = false;
+let touchMode = false; // 손가락으로 하는 중이면 총알이 자동으로 나가요
+let touchLastX = 0;
+
+// 최고 점수: 브라우저에 저장해서 다시 접속해도 남아 있어요
+const BEST_SCORE_KEY = 'starlight-guard-best-score';
+
+function loadBestScore() {
+  try {
+    return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0;
+  } catch (error) {
+    return 0; // 저장이 막힌 브라우저에서도 게임은 돌아가요
+  }
+}
+
+function saveBestScore(value) {
+  try {
+    localStorage.setItem(BEST_SCORE_KEY, String(value));
+  } catch (error) {
+    // 저장이 막힌 브라우저에서는 이번 접속 동안만 기억해요
+  }
+}
+
+let bestScore = loadBestScore();
+
+// 배경의 별
+const STAR_COLORS = ['#ffffff', '#ffffff', '#8ff4ff', '#ffa6ee'];
+const stars = Array.from({ length: 130 }, () => {
+  const size = 0.5 + Math.random() * 1.7;
+  return {
+    x: Math.random() * W,
+    y: Math.random() * H,
+    size,
+    speed: 5 + size * 10, // 큰 별이 조금 더 빠르게 흘러요
+    color: STAR_COLORS[Math.floor(Math.random() * STAR_COLORS.length)],
+    phase: Math.random() * Math.PI * 2,
+  };
+});
+
+// ===== 소리 (음악 파일 없이 브라우저가 직접 소리를 만들어요) =====
+const MASTER_VOLUME = 0.55;  // 전체 소리 크기
+const MUSIC_STEP = 60 / 126 / 2; // 배경음악 한 칸의 길이(초)
+
+// 배경음악 악보: 숫자가 클수록 높은 음, 0은 쉬는 칸
+const BASS_NOTES = [45, 41, 48, 43]; // 네 마디의 낮은 음
+const LEAD_NOTES = [
+  76, 0, 72, 0, 69, 0, 72, 74,
+  72, 0, 69, 0, 65, 0, 69, 0,
+  72, 0, 76, 0, 79, 0, 76, 72,
+  74, 0, 71, 0, 67, 0, 71, 74,
+];
+
+let audio = null;
+let masterGain = null;
+let musicGain = null;
+let noiseBuffer = null;
+let soundOn = true;
+let musicStep = 0;
+let musicTime = 0;
+
+// 소리가 한꺼번에 겹쳐도 찢어지지 않게 크기를 눌러 주는 장치를 달아요
+function createMaster(engine) {
+  const limiter = engine.createDynamicsCompressor();
+  limiter.threshold.value = -10;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.15;
+  const master = engine.createGain();
+  master.connect(limiter);
+  limiter.connect(engine.destination);
+  return master;
+}
+
+// 브라우저는 사용자가 버튼이나 키를 누른 뒤에만 소리를 허락해요
+function initAudio() {
+  if (!audio) {
+    const AudioEngine = window.AudioContext || window.webkitAudioContext;
+    if (!AudioEngine) return;
+    audio = new AudioEngine();
+    masterGain = createMaster(audio);
+    masterGain.gain.value = soundOn ? MASTER_VOLUME : 0;
+    musicGain = audio.createGain();
+    musicGain.connect(masterGain);
+
+    // 폭발 소리에 쓰는 "치익" 잡음
+    noiseBuffer = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+    const samples = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) samples[i] = Math.random() * 2 - 1;
+  }
+  if (audio.state === 'suspended') audio.resume();
+}
+
+function playTone(freq, endFreq, type, start, length, volume, output) {
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, start);
+  osc.frequency.exponentialRampToValueAtTime(endFreq, start + length);
+  gain.gain.setValueAtTime(volume, start);
+  gain.gain.exponentialRampToValueAtTime(0.001, start + length);
+  osc.connect(gain);
+  gain.connect(output);
+  osc.start(start);
+  osc.stop(start + length);
+}
+
+function playNoise(start, length, volume) {
+  const source = audio.createBufferSource();
+  const filter = audio.createBiquadFilter();
+  const gain = audio.createGain();
+  source.buffer = noiseBuffer;
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(2200, start);
+  filter.frequency.exponentialRampToValueAtTime(180, start + length);
+  gain.gain.setValueAtTime(volume, start);
+  gain.gain.exponentialRampToValueAtTime(0.001, start + length);
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(masterGain);
+  source.start(start);
+  source.stop(start + length);
+}
+
+function playShootSound() {
+  if (!audio) return;
+  playTone(900, 240, 'square', audio.currentTime, 0.1, 0.22, masterGain);
+}
+
+function playExplosionSound() {
+  if (!audio) return;
+  const now = audio.currentTime;
+  playNoise(now, 0.28, 0.4);
+  playTone(180, 45, 'triangle', now, 0.25, 0.3, masterGain);
+}
+
+function playGameOverSound() {
+  if (!audio) return;
+  const now = audio.currentTime;
+  [392, 330, 262, 196].forEach((freq, i) => {
+    playTone(freq, freq * 0.94, 'sawtooth', now + i * 0.18, 0.32, 0.3, masterGain);
+  });
+  playNoise(now, 0.6, 0.35);
+}
+
+function noteToFreq(note) {
+  return 440 * Math.pow(2, (note - 69) / 12);
+}
+
+function playMusicStep(step, when) {
+  const bass = BASS_NOTES[Math.floor(step / 8)] + (step % 4 === 2 ? 12 : 0);
+  const bassFreq = noteToFreq(bass);
+  playTone(bassFreq, bassFreq, 'triangle', when, MUSIC_STEP * 0.9, 0.22, musicGain);
+  if (LEAD_NOTES[step] > 0) {
+    const leadFreq = noteToFreq(LEAD_NOTES[step]);
+    playTone(leadFreq, leadFreq, 'square', when, MUSIC_STEP * 1.4, 0.06, musicGain);
+  }
+}
+
+function startMusic() {
+  if (!audio) return;
+  musicStep = 0;
+  musicTime = audio.currentTime + 0.05;
+  musicGain.gain.cancelScheduledValues(audio.currentTime);
+  musicGain.gain.setTargetAtTime(1, audio.currentTime, 0.01);
+}
+
+function stopMusic() {
+  if (!audio) return;
+  musicGain.gain.setTargetAtTime(0, audio.currentTime, 0.03);
+}
+
+// 곧 나올 음만 미리 예약해요. 끝까지 가면 처음으로 돌아가 반복돼요
+function scheduleMusic() {
+  if (!audio) return;
+  if (musicTime < audio.currentTime) musicTime = audio.currentTime + 0.05;
+  while (musicTime < audio.currentTime + 0.15) {
+    playMusicStep(musicStep, musicTime);
+    musicTime += MUSIC_STEP;
+    musicStep = (musicStep + 1) % LEAD_NOTES.length;
+  }
+}
+
+// 버튼을 눌러도 총알이 나가지 않게 해요
+soundBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+soundBtn.addEventListener('click', () => {
+  soundOn = !soundOn;
+  initAudio();
+  if (masterGain) {
+    masterGain.gain.setTargetAtTime(soundOn ? MASTER_VOLUME : 0, audio.currentTime, 0.01);
+  }
+  const label = soundOn ? '소리 끄기' : '소리 켜기';
+  soundBtn.setAttribute('aria-label', label);
+  soundBtn.title = label;
+  soundBtn.classList.toggle('off', !soundOn);
+  soundBtn.blur();
+});
+
+// ===== 게임 시작과 끝 =====
+// fromAbove가 true면 화면 위에서 날아와 자리를 잡아요
+function spawnAliens(fromAbove) {
+  alienDir = 1;
+  enemyShotTimer = 1;
+  diveTimer = 2;
+  aliens = [];
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      // homeX, homeY는 대열 속 자리, x, y는 지금 실제 위치
+      const homeX = 148 + col * 72;
+      const homeY = formationTop + row * 52;
+      aliens.push({
+        row, col, homeX, homeY,
+        x: homeX,
+        y: fromAbove ? homeY - formationTop - 242 : homeY,
+        w: 44, h: 34,
+        mode: fromAbove ? 'return' : 'home', // home(대열), dive(급강하), return(돌아가는 중)
+        path: null, t: 0, diveTime: 0,
+      });
+    }
+  }
+}
+
+function resetGame() {
+  score = 0;
+  stage = 1;
+  lives = START_LIVES;
+  hasShield = false;
+  doubleTime = 0;
+  invincible = 0;
+  bannerTime = 0;
+  shots = [];
+  enemyShots = [];
+  items = [];
+  particles = [];
+  shotCooldown = 0;
+  player.x = W / 2;
+  spawnAliens(false);
+}
+
+function startGame() {
+  if (state === 'playing') return;
+  initAudio();
+  resetGame();
+  bannerTime = BANNER_TIME;
+  mouseDown = false;
+  if (touchMode) mouseX = null;
+  state = 'playing';
+  overlay.hidden = true;
+  startBtn.blur();
+  startMusic();
+}
+
+function nextStage() {
+  if (stage >= MAX_STAGE) {
+    endGame('clear');
+    return;
+  }
+  stage++;
+  shots = [];
+  enemyShots = [];
+  spawnAliens(true);
+  bannerTime = BANNER_TIME;
+}
+
+function endGame(result) {
+  state = result;
+  shots = [];
+  enemyShots = [];
+  items = [];
+  stopMusic();
+  if (result === 'over') {
+    explode(player.x, player.y, '#00e5ff', 50);
+    playGameOverSound();
+    headline.textContent = '게임 오버';
+  } else {
+    headline.textContent = '클리어!';
+  }
+  headline.className = result;
+  if (score > bestScore) {
+    bestScore = score;
+    saveBestScore(bestScore);
+  }
+  message.textContent = '이번 점수 ' + score + '\n최고 점수 ' + bestScore + '\n스테이지 ' + stage;
+  startBtn.textContent = '다시 시작';
+  overlay.hidden = false;
+}
+
+startBtn.addEventListener('click', startGame);
+
+// ===== 키보드와 마우스 =====
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter' && state !== 'playing') {
+    e.preventDefault();
+    startGame();
+    return;
+  }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'Space') {
+    e.preventDefault();
+    keys[e.code] = true;
+    touchMode = false;
+  }
+});
+window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+function clampShipX(x) {
+  return Math.max(30, Math.min(W - 30, x));
+}
+
+function trackPointer(e) {
+  const rect = canvas.getBoundingClientRect();
+  if (e.pointerType !== 'touch') {
+    mouseX = (e.clientX - rect.left) / rect.width * W;
+    return;
+  }
+  // 손가락은 끈 거리만큼만 움직여요. 두 번째 손가락은 무시해요
+  if (!e.isPrimary) return;
+  const start = mouseX === null ? player.x : mouseX;
+  mouseX = clampShipX(start + (e.clientX - touchLastX) / rect.width * W);
+  touchLastX = e.clientX;
+}
+window.addEventListener('pointermove', trackPointer);
+window.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') {
+    touchMode = true;
+    if (e.isPrimary) touchLastX = e.clientX;
+    return;
+  }
+  touchMode = false;
+  trackPointer(e);
+  if (e.button === 0) mouseDown = true;
+});
+window.addEventListener('pointerup', () => { mouseDown = false; });
+
+// 손가락을 오래 눌러도 메뉴가 뜨지 않게 해요
+window.addEventListener('contextmenu', (e) => {
+  if (touchMode) e.preventDefault();
+});
+
+// 다른 창으로 넘어가면 누르고 있던 키를 놓은 것으로 처리
+window.addEventListener('blur', () => {
+  keys.ArrowLeft = keys.ArrowRight = keys.Space = false;
+  mouseDown = false;
+});
+
+// ===== 게임 규칙 =====
+function overlaps(a, b) {
+  return Math.abs(a.x - b.x) < (a.w + b.w) / 2 &&
+         Math.abs(a.y - b.y) < (a.h + b.h) / 2;
+}
+
+// 작은 조각들이 빙글빙글 돌며 흩어지고, 둥근 빛 고리가 퍼져요
+function explode(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 60 + Math.random() * 280;
+    const life = 0.4 + Math.random() * 0.6;
+    particles.push({
+      x, y, life,
+      color: i % 4 === 0 ? '#ffffff' : color,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      maxLife: life,
+      size: 2 + Math.random() * 5,
+      angle: Math.random() * Math.PI * 2,
+      spin: (Math.random() - 0.5) * 14,
+    });
+  }
+  particles.push({ x, y, color, vx: 0, vy: 0, life: 0.35, maxLife: 0.35, size: 0, angle: 0, spin: 0, ring: true });
+}
+
+function moveShip(dt) {
+  const dir = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
+  if (dir !== 0) {
+    player.x += dir * SHIP_SPEED * dt;
+    mouseX = null;
+  } else if (mouseX !== null) {
+    player.x = mouseX;
+  }
+  // 화면 밖으로 나가지 않게 막기
+  player.x = clampShipX(player.x);
+}
+
+function fireShots(dt) {
+  shotCooldown -= dt;
+  if ((keys.Space || mouseDown || touchMode) && shotCooldown <= 0) {
+    const offsets = doubleTime > 0 ? [-11, 11] : [0];
+    for (const offset of offsets) {
+      shots.push({ x: player.x + offset, y: player.y - 26, w: 5, h: 18 });
+    }
+    shotCooldown = SHOT_DELAY;
+    playShootSound();
+  }
+}
+
+function moveFormation(dt) {
+  // 스테이지가 오르거나 외계인이 줄어들수록 빨라져요
+  const speed = ALIEN_SPEED + (stage - 1) * STAGE_SPEED_UP + (ROWS * COLS - aliens.length) * 6;
+  let hitWall = false;
+  for (const a of aliens) {
+    a.homeX += alienDir * speed * dt;
+    if ((alienDir > 0 && a.homeX > W - 42) || (alienDir < 0 && a.homeX < 42)) hitWall = true;
+  }
+  if (hitWall) {
+    alienDir = -alienDir;
+    for (const a of aliens) a.homeY += ALIEN_DROP * speedRatio;
+  }
+}
+
+// 곡선 위의 위치 계산 (t가 0이면 출발점, 1이면 도착점)
+function curvePoint(path, t) {
+  const u = 1 - t;
+  const w = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+  return [
+    w[0] * path[0][0] + w[1] * path[1][0] + w[2] * path[2][0] + w[3] * path[3][0],
+    w[0] * path[0][1] + w[1] * path[1][1] + w[2] * path[2][1] + w[3] * path[3][1],
+  ];
+}
+
+function startDive(dt) {
+  if (stage < DIVE_START_STAGE) return;
+  diveTimer -= dt;
+  if (diveTimer > 0) return;
+
+  // 스테이지가 높을수록 더 자주 급강하해요
+  diveTimer = Math.max(1, 4.5 - stage * 0.5) + Math.random() * 1.5;
+  const waiting = aliens.filter((a) => a.mode === 'home');
+  if (waiting.length === 0) return;
+
+  const a = waiting[Math.floor(Math.random() * waiting.length)];
+  const side = a.x < player.x ? -1 : 1;
+  const edge = (x) => Math.max(30, Math.min(W - 30, x));
+  // 바깥으로 크게 돌았다가 우주선 쪽으로 파고드는 곡선
+  a.path = [
+    [a.x, a.y],
+    [edge(a.x + side * 170), a.y + 60],
+    [edge(player.x - side * 220), H * 0.62],
+    [edge(player.x + side * 80), H + 50],
+  ];
+  a.t = 0;
+  a.diveTime = Math.max(1.6, 2.8 - stage * 0.2);
+  a.mode = 'dive';
+}
+
+function moveAliens(dt) {
+  for (const a of aliens) {
+    if (a.mode === 'dive') {
+      a.t += dt / a.diveTime;
+      if (a.t < 1) {
+        [a.x, a.y] = curvePoint(a.path, a.t);
+      } else {
+        // 화면 아래로 나가면 위에서 다시 나타나 대열로 돌아가요
+        a.mode = 'return';
+        a.x = a.homeX;
+        a.y = -40;
+      }
+    } else if (a.mode === 'return') {
+      const dx = a.homeX - a.x;
+      const dy = a.homeY - a.y;
+      const dist = Math.hypot(dx, dy);
+      const step = RETURN_SPEED * dt;
+      if (dist <= step) {
+        a.mode = 'home';
+      } else {
+        a.x += dx / dist * step;
+        a.y += dy / dist * step;
+      }
+    }
+    if (a.mode === 'home') {
+      a.x = a.homeX;
+      a.y = a.homeY;
+    }
+  }
+}
+
+function alienShoot(dt) {
+  enemyShotTimer -= dt;
+  if (enemyShotTimer > 0) return;
+
+  // 칸마다 대열 맨 아래에 있는 외계인만 쏠 수 있어요
+  const lowest = {};
+  for (const a of aliens) {
+    if (a.mode !== 'home') continue;
+    if (!lowest[a.col] || a.y > lowest[a.col].y) lowest[a.col] = a;
+  }
+  const shooters = Object.values(lowest);
+  if (shooters.length === 0) return;
+  const a = shooters[Math.floor(Math.random() * shooters.length)];
+  enemyShots.push({ x: a.x, y: a.y + 20, w: 8, h: 14 });
+  enemyShotTimer = 0.35 + Math.random() * 0.9;
+}
+
+function moveShots(dt) {
+  for (const s of shots) s.y -= SHOT_SPEED * speedRatio * dt;
+  for (const s of enemyShots) s.y += ENEMY_SHOT_SPEED * speedRatio * dt;
+
+  // 내 총알이 외계인에 맞았는지 확인
+  shots = shots.filter((s) => {
+    const hit = aliens.find((a) => overlaps(s, a));
+    if (!hit) return s.y > -20;
+    aliens.splice(aliens.indexOf(hit), 1);
+    score += SCORE_PER_ALIEN;
+    explode(hit.x, hit.y, ALIEN_COLORS[hit.row], 28);
+    playExplosionSound();
+    if (Math.random() < ITEM_CHANCE) dropItem(hit.x, hit.y);
+    return false;
+  });
+  enemyShots = enemyShots.filter((s) => s.y < H + 20);
+}
+
+function dropItem(x, y) {
+  const type = Math.random() < 0.5 ? 'double' : 'shield';
+  items.push({ x, y, w: 30, h: 30, type });
+}
+
+function moveItems(dt) {
+  items = items.filter((item) => {
+    item.y += ITEM_SPEED * speedRatio * dt;
+    if (!overlaps(item, player)) return item.y < H + 20;
+    if (item.type === 'double') doubleTime = DOUBLE_SHOT_TIME;
+    else hasShield = true;
+    explode(item.x, item.y, ITEM_COLORS[item.type], 12);
+    return false;
+  });
+}
+
+// 우주선이 맞았을 때: 방어막이 있으면 막고, 없으면 목숨이 줄어요
+function hitShip() {
+  if (hasShield) {
+    hasShield = false;
+    invincible = 1;
+    explode(player.x, player.y, ITEM_COLORS.shield, 18);
+    return;
+  }
+  lives--;
+  if (lives <= 0) {
+    endGame('over');
+    return;
+  }
+  invincible = 2;
+  explode(player.x, player.y, '#00e5ff', 20);
+}
+
+function checkHits() {
+  if (invincible <= 0) {
+    const shot = enemyShots.find((s) => overlaps(s, player));
+    if (shot) {
+      enemyShots.splice(enemyShots.indexOf(shot), 1);
+      hitShip();
+    }
+  }
+  if (state !== 'playing') return;
+
+  if (invincible <= 0) {
+    const touching = aliens.find((a) => overlaps(a, player));
+    if (touching) {
+      aliens.splice(aliens.indexOf(touching), 1);
+      explode(touching.x, touching.y, ALIEN_COLORS[touching.row], 28);
+      playExplosionSound();
+      hitShip();
+    }
+  }
+  if (state !== 'playing') return;
+
+  // 대열이 우주선 높이까지 내려오면 맞은 것으로 치고, 대열은 위로 돌아가요
+  if (aliens.some((a) => a.homeY + a.h / 2 >= player.y - player.h / 2)) {
+    if (invincible <= 0) hitShip();
+    if (state !== 'playing') return;
+    const lift = Math.min(...aliens.map((a) => a.homeY)) - formationTop;
+    for (const a of aliens) {
+      a.homeY -= lift;
+      if (a.mode === 'home') a.mode = 'return';
+    }
+  }
+
+  if (aliens.length === 0) nextStage();
+}
+
+function update(dt) {
+  time += dt;
+
+  for (const s of stars) {
+    s.y += s.speed * dt;
+    if (s.y > H) { s.y = 0; s.x = Math.random() * W; }
+  }
+  for (const p of particles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 1 - 2.2 * dt; // 조각이 점점 느려져요
+    p.vy *= 1 - 2.2 * dt;
+    p.angle += p.spin * dt;
+    p.life -= dt;
+  }
+  particles = particles.filter((p) => p.life > 0);
+
+  if (state !== 'playing') return;
+  moveShip(dt);
+  moveItems(dt);
+  doubleTime = Math.max(0, doubleTime - dt);
+  invincible = Math.max(0, invincible - dt);
+
+  // "스테이지 N" 글자가 떠 있는 동안에는 외계인이 자리만 잡아요
+  if (bannerTime > 0) {
+    bannerTime -= dt;
+    moveAliens(dt);
+    return;
+  }
+
+  fireShots(dt);
+  moveFormation(dt);
+  startDive(dt);
+  moveAliens(dt);
+  alienShoot(dt);
+  moveShots(dt);
+  checkHits();
+}
+
+// ===== 그리기 =====
+function tracePath(points) {
+  ctx.beginPath();
+  points.forEach(([x, y], i) => (i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)));
+  ctx.closePath();
+}
+
+function fillPath(color, points) {
+  tracePath(points);
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+// 네온 칠하기: 속은 은은하게, 테두리는 밝게
+function neonPaint(color) {
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.25;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function neonPath(color, points) {
+  tracePath(points);
+  neonPaint(color);
+}
+
+function neonEllipse(x, y, rx, ry, rotation, color) {
+  ctx.beginPath();
+  ctx.ellipse(x, y, rx, ry, rotation, 0, Math.PI * 2);
+  neonPaint(color);
+}
+
+function drawCircle(x, y, r, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawStarShape(x, y, r, color) {
+  const points = [];
+  for (let i = 0; i < 8; i++) {
+    const len = i % 2 === 0 ? r : r * 0.38;
+    const angle = i * Math.PI / 4 - Math.PI / 2;
+    points.push([x + Math.cos(angle) * len, y + Math.sin(angle) * len]);
+  }
+  fillPath(color, points);
+}
+
+// 눈동자가 우주선 쪽을 바라봐요
+function drawEye(x, y, r, alien) {
+  const look = Math.max(-1, Math.min(1, (player.x - alien.x) / 200)) * r * 0.35;
+  drawCircle(x, y, r, '#fff');
+  drawCircle(x + look, y + r * 0.25, r * 0.55, '#15162e');
+}
+
+function drawShip(x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  // 엔진 불꽃
+  const flame = 13 + Math.sin(time * 42) * 5;
+  fillPath('#ff2fd0', [[-7, 16], [7, 16], [0, 18 + flame]]);
+  fillPath('#ffffff', [[-3, 16], [3, 16], [0, 16 + flame * 0.6]]);
+
+  // 뒤로 젖혀진 날개
+  neonPath('#00e5ff', [[-5, -8], [-30, 12], [-26, 21], [-6, 13]]);
+  neonPath('#00e5ff', [[5, -8], [30, 12], [26, 21], [6, 13]]);
+  neonPath('#ff2fd0', [[-30, 12], [-34, 2], [-26, 8]]);
+  neonPath('#ff2fd0', [[30, 12], [34, 2], [26, 8]]);
+
+  // 몸통
+  ctx.beginPath();
+  ctx.moveTo(0, -27);
+  ctx.quadraticCurveTo(12, -6, 8, 18);
+  ctx.lineTo(-8, 18);
+  ctx.quadraticCurveTo(-12, -6, 0, -27);
+  neonPaint('#d8fbff');
+
+  // 조종석의 별
+  drawStarShape(0, -1, 7, '#fff200');
+  ctx.restore();
+}
+
+function drawJelly(a, color, wave) {
+  // 해파리: 둥근 머리와 흔들리는 다리
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  for (let i = -3; i <= 3; i += 2) {
+    const x = i * 5;
+    ctx.beginPath();
+    ctx.moveTo(x, 2);
+    ctx.quadraticCurveTo(x + wave * 5, 9, x - wave * 3, 16);
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(0, 1, 20, Math.PI, 0);
+  ctx.closePath();
+  neonPaint(color);
+  drawEye(-7, -6, 4, a);
+  drawEye(7, -6, 4, a);
+}
+
+function drawCrystal(a, color, wave) {
+  // 수정: 다이아몬드 몸통과 파닥이는 지느러미
+  const fin = 20 + wave * 3;
+  neonPath(color, [[-10, -6], [-fin, -12], [-fin + 2, 8], [-10, 6]]);
+  neonPath(color, [[10, -6], [fin, -12], [fin - 2, 8], [10, 6]]);
+  neonPath(color, [[0, -18], [14, 0], [0, 18], [-14, 0]]);
+  neonPath(color, [[0, -18], [14, 0], [0, -3]]);
+  drawEye(0, 1, 5.5, a);
+}
+
+function drawMoth(a, color, wave) {
+  // 나방: 네 장의 날개와 더듬이
+  const flap = 0.35 + wave * 0.22;
+  for (const side of [-1, 1]) {
+    neonEllipse(side * 14, -5, 11, 7, side * -flap, color);
+    neonEllipse(side * 12, 8, 8, 5, side * flap, color);
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(side * 2, -10);
+    ctx.lineTo(side * 8, -17);
+    ctx.stroke();
+  }
+  neonEllipse(0, 1, 8, 13, 0, color);
+  drawEye(-3.5, -4, 3, a);
+  drawEye(3.5, -4, 3, a);
+}
+
+function drawOrb(a, color) {
+  // 가시 구슬: 빙글빙글 도는 가시와 커다란 눈 하나
+  ctx.save();
+  ctx.rotate(time * 1.6);
+  for (let i = 0; i < 8; i++) {
+    ctx.rotate(Math.PI / 4);
+    neonPath(color, [[-4, -12], [4, -12], [0, -19]]);
+  }
+  ctx.restore();
+  neonEllipse(0, 0, 13, 13, 0, color);
+  drawEye(0, 0, 7, a);
+}
+
+function drawAlien(a) {
+  const color = ALIEN_COLORS[a.row];
+  const wave = Math.sin(time * 6 + a.col * 0.8);
+  ctx.save();
+  ctx.translate(a.x, a.y);
+  if (a.row === 0) drawJelly(a, color, wave);
+  else if (a.row === 1) drawCrystal(a, color, wave);
+  else if (a.row === 2) drawMoth(a, color, wave);
+  else drawOrb(a, color);
+  ctx.restore();
+}
+
+function drawHeart(x, y, s, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y + s);
+  ctx.bezierCurveTo(x - s * 1.4, y + s * 0.1, x - s * 0.9, y - s * 0.9, x, y - s * 0.25);
+  ctx.bezierCurveTo(x + s * 0.9, y - s * 0.9, x + s * 1.4, y + s * 0.1, x, y + s);
+  ctx.fill();
+}
+
+function drawItem(item) {
+  const color = ITEM_COLORS[item.type];
+  ctx.save();
+  ctx.translate(item.x, item.y);
+  ctx.globalAlpha = 0.3;
+  drawCircle(0, 0, 18 + Math.sin(time * 8) * 2, color);
+  ctx.globalAlpha = 1;
+  drawCircle(0, 0, 13, color);
+  if (item.type === 'double') {
+    // 총알 두 개 그림
+    ctx.fillStyle = '#12351c';
+    ctx.fillRect(-6, -7, 4, 14);
+    ctx.fillRect(2, -7, 4, 14);
+  } else {
+    // 방패 그림
+    fillPath('#4a3c05', [[0, -8], [7, -5], [6, 4], [0, 9], [-6, 4], [-7, -5]]);
+  }
+  ctx.restore();
+}
+
+function hudFont(size) {
+  return 'bold ' + size * uiScale + 'px "Malgun Gothic", "Apple SD Gothic Neo", sans-serif';
+}
+
+function drawHud() {
+  const stageText = '스테이지 ' + stage + ' · 남은 외계인 ' + aliens.length;
+  ctx.font = hudFont(20);
+  ctx.fillStyle = '#a8f6ff';
+  ctx.textAlign = 'left';
+  ctx.fillText('점수 ' + score, 18, 34 * uiScale);
+  if (isNarrow) {
+    ctx.fillText(stageText, 18, 62 * uiScale);
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillText(stageText, W / 2, 34 * uiScale);
+  }
+
+  for (let i = 0; i < START_LIVES; i++) {
+    // 오른쪽 끝은 소리 버튼 자리라서 그 왼쪽에 그려요
+    const heartX = hudRight - (20 + (START_LIVES - 1 - i) * 32) * uiScale;
+    drawHeart(heartX, 27 * uiScale, 12 * uiScale, i < lives ? '#ff2a6d' : 'rgba(255, 255, 255, 0.18)');
+  }
+
+  // 지금 갖고 있는 아이템 효과
+  const statusY = (isNarrow ? 88 : 60) * uiScale;
+  ctx.font = hudFont(16);
+  ctx.textAlign = 'left';
+  let statusX = 18;
+  if (doubleTime > 0) {
+    ctx.fillStyle = ITEM_COLORS.double;
+    ctx.fillText('두 발 ' + Math.ceil(doubleTime) + '초', statusX, statusY);
+    statusX += 90 * uiScale;
+  }
+  if (hasShield) {
+    ctx.fillStyle = ITEM_COLORS.shield;
+    ctx.fillText('방어막', statusX, statusY);
+  }
+
+  if (bannerTime > 0) {
+    ctx.globalAlpha = Math.min(1, bannerTime * 2);
+    ctx.fillStyle = '#00e5ff';
+    ctx.font = 'bold 72px "Malgun Gothic", "Apple SD Gothic Neo", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('스테이지 ' + stage, W / 2, H / 2 + 70);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// 어두운 우주 배경을 한 번만 그려 두고 계속 다시 써요
+function makeBackground() {
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const g = c.getContext('2d');
+  const sky = g.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#03010f');
+  sky.addColorStop(1, '#0b0326');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, W, H);
+
+  // 희미한 우주 구름
+  const clouds = [
+    [170, 150, 300, 'rgba(255, 47, 208, 0.10)'],
+    [650, 400, 340, 'rgba(0, 229, 255, 0.08)'],
+    [380, 640, 300, 'rgba(120, 60, 255, 0.14)'],
+  ];
+  for (const [x, y, r, color] of clouds) {
+    const cloud = g.createRadialGradient(x, y, 0, x, y, r);
+    cloud.addColorStop(0, color);
+    cloud.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    g.fillStyle = cloud;
+    g.fillRect(0, 0, W, H);
+  }
+  return c;
+}
+const background = makeBackground();
+
+// 네온 빛 번짐: 화면을 작게 줄였다가 크게 늘려서 흐릿한 빛을 겹쳐요
+const glowCanvas = document.createElement('canvas');
+glowCanvas.width = 200;
+glowCanvas.height = 150;
+const glowCtx = glowCanvas.getContext('2d');
+
+function drawGlow() {
+  glowCtx.clearRect(0, 0, glowCanvas.width, glowCanvas.height);
+  glowCtx.drawImage(canvas, 0, 0, glowCanvas.width, glowCanvas.height);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.8;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(glowCanvas, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+}
+
+function draw() {
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  ctx.drawImage(background, 0, 0, W, H);
+
+  // 천천히 아래로 흐르며 반짝이는 별
+  for (const s of stars) {
+    ctx.globalAlpha = 0.45 + 0.45 * Math.sin(time * 2.5 + s.phase);
+    drawCircle(s.x, s.y, s.size, s.color);
+  }
+  ctx.globalAlpha = 1;
+
+  aliens.forEach(drawAlien);
+
+  // 내 총알: 빛줄기
+  for (const s of shots) {
+    ctx.fillStyle = '#00e5ff';
+    ctx.fillRect(s.x - 3.5, s.y - s.h / 2, 7, s.h);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(s.x - 1.5, s.y - s.h / 2, 3, s.h);
+  }
+  // 외계인 총알: 붉은 별
+  for (const s of enemyShots) {
+    drawCircle(s.x, s.y, 8, 'rgba(255, 42, 109, 0.4)');
+    drawStarShape(s.x, s.y, 10, '#ff2a6d');
+  }
+
+  // 폭발 조각과 빛 고리
+  for (const p of particles) {
+    const fade = p.life / p.maxLife;
+    ctx.globalAlpha = fade;
+    if (p.ring) {
+      ctx.strokeStyle = p.color;
+      ctx.lineWidth = 3 * fade;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 8 + (1 - fade) * 46, 0, Math.PI * 2);
+      ctx.stroke();
+    } else {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.angle);
+      fillPath(p.color, [[-p.size, -p.size * 0.6], [p.size, 0], [-p.size * 0.4, p.size]]);
+      ctx.restore();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  items.forEach(drawItem);
+
+  // 맞은 직후에는 우주선이 깜빡여요
+  const blinkOff = invincible > 0 && Math.floor(time * 12) % 2 === 0;
+  if (state !== 'over' && !blinkOff) drawShip(player.x, player.y);
+
+  if (hasShield && state !== 'over') {
+    ctx.strokeStyle = ITEM_COLORS.shield;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, 40, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 0.14;
+    drawCircle(player.x, player.y, 40, ITEM_COLORS.shield);
+    ctx.globalAlpha = 1;
+  }
+
+  drawHud();
+  drawGlow();
+}
+
+// ===== 창 크기에 맞추기 =====
+// 세로 길이가 바뀌면 화면 속 물건들의 높이도 같은 비율로 옮겨요
+function rescaleWorld(factor) {
+  for (const list of [aliens, shots, enemyShots, items, particles, stars]) {
+    for (const thing of list) thing.y *= factor;
+  }
+  for (const a of aliens) {
+    a.homeY *= factor;
+    if (a.path) for (const point of a.path) point[1] *= factor;
+  }
+}
+
+function resize() {
+  const viewW = window.innerWidth;
+  const viewH = window.innerHeight;
+
+  // 세로로 긴 화면이면 게임 공간을 위아래로 늘려요
+  const newH = Math.max(BASE_H, Math.min(MAX_H, W * viewH / viewW));
+  const cssW = Math.min(viewW, viewH * W / newH);
+  const cssH = cssW * newH / W;
+  document.documentElement.style.setProperty('--w', cssW + 'px');
+  document.documentElement.style.setProperty('--h', cssH + 'px');
+
+  rescaleWorld(newH / H);
+  H = newH;
+  speedRatio = H / BASE_H;
+
+  // 글자가 너무 작아지지 않게 키워요
+  const cssScale = cssW / W;
+  uiScale = Math.max(1, 14 / (20 * cssScale));
+  isNarrow = uiScale > 1.1;
+  formationTop = isNarrow ? Math.round(88 * uiScale) + 40 : 88;
+  player.y = H - (isNarrow ? 90 : 46);
+
+  // 휴대폰이 너무 애쓰지 않도록 선명도는 2배까지만
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(cssW * ratio);
+  canvas.height = Math.round(cssH * ratio);
+  scale = canvas.width / W;
+  glowCanvas.height = Math.round(glowCanvas.width * H / W);
+  glowCtx.imageSmoothingQuality = 'high';
+
+  const canvasBox = canvas.getBoundingClientRect();
+  hudRight = (soundBtn.getBoundingClientRect().left - canvasBox.left) / cssScale - 8;
+}
+window.addEventListener('resize', resize);
+
+// 휴대폰에서 다른 앱에 다녀오면 소리를 다시 켜요
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && audio && audio.state !== 'running') audio.resume();
+});
+
+function showStartMessage() {
+  const controls = window.matchMedia('(pointer: coarse)').matches
+    ? '손가락으로 좌우로 끌면 이동\n총알은 자동으로 나가요'
+    : '이동: ← → 방향키 또는 마우스\n발사: 스페이스바 또는 마우스 클릭';
+  const best = bestScore > 0 ? '\n최고 점수 ' + bestScore : '';
+  message.textContent = controls + '\n초록 아이템: 10초 동안 두 발씩\n노란 아이템: 방어막' + best;
+}
+
+// ===== 게임 반복: 1초에 수십 번 "계산하고 그리기"를 되풀이 =====
+let lastTime = performance.now();
+function loop(now) {
+  // 창을 내렸다 돌아와도 게임이 갑자기 튀지 않도록 시간을 제한
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  update(dt);
+  draw();
+  if (state === 'playing') scheduleMusic();
+  requestAnimationFrame(loop);
+}
+
+resize();
+resetGame();
+showStartMessage();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
